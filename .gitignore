@@ -1,0 +1,30 @@
+# Environments
+.env
+.venv/
+env/
+venv/
+
+# Cache
+.cache/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Data and Vector Store
+data/
+*.pdf
+
+# Testing/Logs
+test_50_results.txt
+*.log
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
