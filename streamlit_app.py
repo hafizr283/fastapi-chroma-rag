@@ -112,6 +112,19 @@ if ask_button and question:
                     for i, src in enumerate(sources, 1):
                         with st.expander(f"Source [{i}]: {src['filename']} — Page {src['page_number']} (Chunk ID: {src['chunk_id'][:12]})"):
                             st.write(src["text"])
+            elif query_resp.status_code == 503:
+                # No LLM backend available. The API deliberately returns no
+                # answer rather than an unsynthesised one, so show why.
+                try:
+                    detail = query_resp.json().get("detail", query_resp.text)
+                except ValueError:
+                    detail = query_resp.text
+                st.error("🚫 No answer generated — the language model is unavailable.")
+                st.warning(detail)
+                st.caption(
+                    "Answers require a working Gemini or OpenAI key with available quota. "
+                    "The free Gemini tier allows 20 requests per day."
+                )
             else:
                 st.error(f"Query Error: {query_resp.text}")
         except Exception as e:

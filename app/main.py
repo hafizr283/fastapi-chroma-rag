@@ -13,7 +13,7 @@ from app.models import (
     DeleteResponse
 )
 from app.ingestion import ingestion_pipeline
-from app.retrieval import retrieval_pipeline
+from app.retrieval import retrieval_pipeline, LLMUnavailableError
 from app.vectorstore import vector_store
 
 # Setup logging
@@ -81,6 +81,10 @@ async def upload_document(file: UploadFile = File(...)):
             uploaded_at=uploaded_at
         )
 
+    except HTTPException:
+        # Client errors raised above (e.g. empty upload) must pass through
+        # untouched — otherwise the generic handler below relabels them 500.
+        raise
     except ValueError as ve:
         logger.error(f"Validation error during ingestion: {ve}")
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(ve))
@@ -102,6 +106,12 @@ async def query_documents(request: QueryRequest):
             doc_id=request.doc_id
         )
         return response
+    except LLMUnavailableError as e:
+        # Retrieval worked but no LLM could synthesise an answer. 503 is the
+        # honest signal: the request is valid and retryable once quota or the
+        # API key recovers. Never substitute a non-LLM answer here.
+        logger.error(f"LLM unavailable for query: {e}")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e))
     except Exception as e:
         logger.error(f"Error executing query: {e}", exc_info=True)
         raise HTTPException(

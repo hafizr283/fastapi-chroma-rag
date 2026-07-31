@@ -28,3 +28,7 @@ test_50_results.txt
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Playwright UI probe artifacts
+ui_shot.png
+ui_query.png
