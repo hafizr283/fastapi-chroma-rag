@@ -273,3 +273,54 @@ COMMON MISTAKES:
   - Running only one server and wondering why the app doesn't work.
   - Not re-uploading documents after switching embedding models or restarting with a fresh ChromaDB collection.
 
+=== [TOPIC: Why a Passing Test Suite Can Still Have Wrong Answers] ===
+
+WHAT IT IS:
+  A test can report `[PASS]` and still be measuring the wrong thing. In the 50-question suite, `[PASS]` only meant "the regex extractor returned a non-empty string" — NOT "the returned answer is correct." A test that asserts "something came back" gives false confidence: it passes even when the answer is completely wrong.
+
+HOW IT WORKS (step by step — the two traps found):
+  1. Trap 1 — Silent Fallback Masking: The pipeline tries Gemini -> OpenAI -> offline regex extractor. If the API key isn't loaded (server not restarted after editing `.env`), EVERY question silently drops to the offline extractor. The suite still runs and still "passes," so you never notice the LLM never fired. The tell-tale signs: field-dump style answers and `[Tip]: Set GEMINI_API_KEY...` messages in the output.
+  2. Trap 2 — Correctness vs. Match: The offline extractor has field-mapping bugs — a question about "roll number", "registration", or "NID" collapses into the phone-number regex and returns a mobile number; a "date of birth" question returns the form's submission timestamp (`3/15/24`); a "gender" question returns the applicant's name. Each of these returned a non-empty string, so each was marked `[PASS]` despite being wrong. Real accuracy was under 50%.
+
+THE CODE DOES THIS:
+  - `app/retrieval.py`: `synthesize_answer()` chooses Gemini/OpenAI/offline in order — a missing key silently routes everything to offline.
+  - `test_50_questions.py`: `[PASS]` currently asserts a non-empty match, not an expected value. Fixing it means comparing against known-correct answers.
+
+ANALOGY:
+  Imagine grading an exam by checking only that each answer box has ink in it — not whether the answer is right. Every student "passes," even the one who wrote "banana" for a math question. To actually measure learning, you must compare each answer to the answer key.
+
+COMMON MISTAKES:
+  - Trusting a green test run without checking WHAT it asserts. "Non-empty" is not "correct."
+  - Forgetting that retrieval working (correct chunks retrieved) does NOT mean synthesis working (correct answer extracted). Diagnose which of the 4 layers actually failed before "upgrading" the wrong one — here retrieval was healthy and synthesis was the bottleneck, so Phase 2 retrieval upgrades would have been wasted effort.
+  - Not restarting the server after adding an API key, then wondering why answers still look offline.
+
+=== [TOPIC: A Valid API Key Can Still Have Zero Quota (limit: 0)] ===
+
+WHAT IT IS:
+  "My API key works" and "my API calls work" are two different claims. A key can authenticate perfectly and still be refused for the specific model you asked for, because quota is granted PER MODEL, not per key. On the Gemini free tier, `gemini-2.5-pro` has a quota of literally zero — `limit: 0`. Not "2 requests per minute," not "slow down." Zero. Every single call returns `429 RESOURCE_EXHAUSTED`, forever, no matter how long you wait.
+
+HOW IT WORKS (step by step — the actual bug found in this project):
+  1. `.env` set `GEMINI_MODEL=gemini-2.5-pro`, chosen because "pro reasons better than flash."
+  2. The key loaded fine and `google-genai` connected fine — authentication was never the problem.
+  3. Google rejected the call: `Quota exceeded ... limit: 0, model: gemini-2.5-pro`.
+  4. `synthesize_answer()` caught the exception, logged a warning, and fell through to the offline regex extractor.
+  5. The API returned HTTP 200 with a plausible-looking answer. Nothing surfaced the failure to the caller. All 50 test questions ran this way.
+  6. Fix: one line — `GEMINI_MODEL=gemini-2.5-flash`, which has a real free-tier allowance.
+
+THE CODE DOES THIS:
+  - `app/config.py`: `GEMINI_MODEL` default is `gemini-2.5-flash`, but `.env` OVERRIDES the default. A safe default in code is worthless if `.env` overrides it with a broken value — always check the actual resolved value, not the default in the source.
+  - `app/retrieval.py`: `except Exception as e: logger.warning(...)` then falls through. The warning goes to the server log, which nobody was reading. The user sees only the degraded answer.
+
+WHY THE EARLIER DIAGNOSIS WAS WRONG:
+  An earlier fixlog entry blamed the 2 RPM rate limit and "fixed" it with a 32-second sleep between test questions, stretching the suite to ~27 minutes. That was treating the wrong disease: a sleep cannot help when the limit is 0, so the 27 minutes bought nothing. Then a later entry blamed a missing/unloaded API key. Both were plausible, both were wrong, and neither was verified by actually calling the API and reading the error text. One direct call would have shown `limit: 0` immediately.
+
+ANALOGY:
+  Your gym membership card scans fine at the front desk — you are a real, paid-up member. But the climbing wall requires a separate pass you never bought. The card isn't broken; that one facility is simply not included. Waiting in line longer will never get you onto the wall. Switch to a facility your membership covers.
+
+COMMON MISTAKES:
+  - Testing a key with one model, then assuming every model works. Test the exact model your config resolves to.
+  - Reading `429` as "too fast" and adding sleeps. Read the error BODY — it names the metric, the limit, and the model. `limit: 0` means "never," not "slower."
+  - Assuming a code default is what runs. `.env` wins over the default in `config.py`.
+  - Swallowing an API exception into a fallback with only a log warning. A silent fallback turns a loud, 5-second-to-diagnose failure into a subtle quality problem that costs hours. If a fallback fires, surface WHY in the response or a status field.
+  - Trusting a fix that was never verified end-to-end. "Applied cleanly" is not "works."
+

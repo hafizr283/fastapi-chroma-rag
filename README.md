@@ -33,6 +33,13 @@ It supports **multilingual embeddings** (including English and Bengali) to provi
 
 ---
 
+## 📸 Screenshots
+
+![Streamlit Dashboard](ui_shot.png)
+![Query Result](ui_query.png)
+
+---
+
 ## 🚀 Getting Started
 
 ### Prerequisites

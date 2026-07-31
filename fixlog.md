@@ -288,3 +288,111 @@
 **Still needs attention:**
 - User must paste `GEMINI_API_KEY` into `.env` file at `e:/job_project/restapi/.env`.
 - User must re-upload `Udvash All Information.pdf` via Streamlit or `/upload` endpoint after restarting the server.
+
+### 2026-07-31 — 50-Question Result Analysis & Next-Step Recommendation
+
+**Status:** ⚠️ Needs work (diagnostic session, no code changed)
+
+**What was done:**
+- Read `test_50_results.txt` (357 lines) in full to audit real answer quality.
+- Confirmed all 50 answers were produced by the OFFLINE regex extractor, NOT Gemini — evidenced by field-dump answer format and 7 explicit `[Tip]: Set GEMINI_API_KEY...` messages in the output.
+- Established that the `[PASS]` marker only means "regex matched something," not "answer correct." Real correctness is under 50%.
+- Catalogued systematic wrong answers: roll no / registration / NID → returned mobile numbers (Q36/Q37/Q38/Q42/Q43); DOB → returned form-submission timestamp `3/15/24` (Q16/Q18/Q20); gender → returned name (Q44/Q45); several questions fell back to default name or raw chunk dumps.
+
+**What worked:**
+- Retrieval is healthy — every question retrieved 8 chunks and the correct chunks are present (name, address, institute, subjects, parent names, mobile, Bengali Q47-Q50 all correct).
+
+**What didn't work:**
+- The 50-question run never reached Gemini, so the whole suite measured the offline fallback, not the intended LLM path.
+- Offline extractor has field-mapping bugs (numeric fields collapse to phone regex; date field grabs the submission timestamp; gender field grabs the name).
+
+**Root cause (if found):**
+- The test run predates the `.env` key being set (or the server wasn't restarted after it was set), so `synthesize_answer()` skipped Gemini/OpenAI and used the offline extractor for every question.
+- `[PASS]` in `test_50_questions.py` asserts "non-empty regex match," which masks incorrect answers.
+
+**Fix applied:**
+- None this session (analysis + recommendation only).
+
+**Recommended next steps (prioritized):**
+1. Verify the Gemini path end-to-end now that the key is set — restart Uvicorn, re-run ~3 questions, expect natural-language answers (2-min check that determines whether the rest is needed).
+2. If Gemini still doesn't fire, fix the LLM call in `app/retrieval.py` (confirm `gemini-2.5-flash`, add 429 backoff/retry).
+3. Fix offline extractor field-mapping bugs in `app/retrieval.py` (strict field boundaries for roll/registration/NID/DOB/gender so they stop collapsing into phone/name).
+4. Fix the test harness so `[PASS]` asserts correctness (expected-value comparison), not just "regex matched."
+
+**Still needs attention:**
+- Phase 2 retrieval upgrades (hybrid/re-rank/streaming) are premature — answer synthesis, not retrieval, is the current bottleneck. Defer Phase 2 until steps 1-4 land.
+- Awaiting user decision on which step to start with.
+### 2026-07-31 — Gemini Firing Check: ROOT CAUSE FOUND (`gemini-2.5-pro` free-tier quota = 0)
+
+**Status:** ✅ Fixed in config (⚠️ live re-verification still pending)
+
+**What was done:**
+- Ran the recommended step 1: verified whether Gemini actually fires. Server was DOWN, so bypassed it and called the API directly via a temp script `check_gemini.py` using the Drive E venv.
+- Confirmed the API key IS correctly visible to `retrieval.py` (39 chars, `AIzaSy...`) — the `.env` → `os.environ` bridge in `app/config.py` (lines 8-19) works fine.
+- Discovered the resolved model was `gemini-2.5-pro`, not `gemini-2.5-flash` — `.env` line 11 was overriding the safe code default in `app/config.py`.
+- Live call returned: `429 RESOURCE_EXHAUSTED — Quota exceeded for metric: generate_content_free_tier_requests, limit: 0, model: gemini-2.5-pro`.
+
+**What worked:**
+- Direct-call diagnosis pinpointed the cause in one shot, without waiting 3-5 min for Uvicorn.
+- API key, `.env` loading, and `google-genai` client are all confirmed healthy.
+
+**What didn't work:**
+- Every Gemini call fails. `gemini-2.5-pro` has a free-tier quota of **literally zero** (`limit: 0`) — not a rate limit, a hard denial. So `synthesize_answer()` caught the exception and silently used the offline extractor for all 50 test questions.
+
+**Root cause (if found):**
+- `GEMINI_MODEL=gemini-2.5-pro` in `.env`. Gemini free tier grants **zero** quota for `pro`; only `flash` has a real allowance. Quota is per-model, not per-key — a valid key is not sufficient.
+- Two earlier diagnoses in this log were WRONG: (a) the "2 RPM rate limit" entry added a 32s sleep (~27 min suite runtime) — useless, since a sleep cannot help when the limit is 0; (b) the "key not set / server not restarted" theory — the key was set and loading correctly all along.
+
+**Fix applied:**
+- Changed `.env` line 11 to `GEMINI_MODEL=gemini-2.5-flash`, with a warning comment explaining that `pro` is quota-zero on the free tier.
+
+**Still needs attention:**
+- ⚠️ NOT yet verified live — the shell tool became unavailable right after the fix. Re-run `check_gemini.py` (expect `GEMINI IS FIRING -> 'WORKING'`), then restart Uvicorn and re-query ~3 questions expecting natural-language answers.
+- Delete the temp diagnostic `check_gemini.py` once verified.
+- Once Gemini fires, the 32s sleep in `test_50_questions.py` can drop to ~2-4s (flash has a far higher limit), cutting the suite from ~27 min to ~3 min.
+- Consider surfacing fallback reasons in the API response instead of only `logger.warning` — the silent fallback is what hid this bug for a whole test cycle.
+- Offline-extractor field-mapping bugs (roll/registration/NID→mobile, DOB→timestamp, gender→name) still unfixed; they remain the fallback path and still need strict field boundaries.
+
+#information may help: for running uvicorn it takes 3-5 min
+
+### 2026-07-31 — LIVE VERIFICATION: Gemini Path Confirmed Working End-to-End
+
+**Status:** ✅ Working (previous session's fix verified live)
+
+**What was done:**
+- Re-ran `check_gemini.py` via the Drive E venv → `GEMINI IS FIRING -> 'WORKING'`. Key loads at 39 chars, model resolves to `gemini-2.5-flash`.
+- Started Uvicorn (`app.main:app` on 127.0.0.1:8000) and probed `/query` over real HTTP to confirm Gemini fires through `app/retrieval.py`, not just a standalone script. Added a fallback-marker detector to the probe so an offline answer could not be mistaken for an LLM answer.
+- Ran the full `test_api.py` integration suite (all 5 endpoints).
+- Spot-checked a Bengali question and a multi-field numeric question.
+
+**What worked:**
+- All 3 English probe questions answered by GEMINI, not the offline extractor — natural-language, single-sentence answers with 8 source citations each:
+  - name → `Md. Hafizur Rahman`
+  - DOB → `26.11.2002` (previously the offline extractor returned the form-submission timestamp `3/15/24`)
+  - institute → `KUET`
+- Bengali round-trip works: `আবেদনকারীর নাম কি?` → `আবেদনকারীর নাম মো: হাফিজুররহমান।`
+- Roll + mobile answered correctly in one response: roll `100779`, mobile `01995465031` — the two fields the offline extractor used to collapse into each other.
+- `test_api.py`: all 5 endpoints PASS (health, upload, list, query, delete + deletion verification). The refund-policy query returned a clean grounded sentence.
+- Existing ChromaDB collection already holds `Udvash All Information.pdf` (16 chunks) under `rag_documents_v2`, so no re-upload was needed.
+
+**What didn't work:**
+- Running two processes that each load the SentenceTransformer model at the same time (Uvicorn + a direct probe script) crashed with `OSError 1455: The paging file is too small`. Windows commit charge cannot hold two copies of the multilingual model.
+- A probe script placed outside the project root failed with `ModuleNotFoundError: No module named 'app'`.
+- Printing Bengali answers through plain `python -c` hit `UnicodeEncodeError` (CP1252) — an console-encoding issue only, the API response itself was fine.
+- The first Uvicorn instance died when an unrelated tool call was interrupted; port 8000 showed `WinError 10061` while `server.log` still showed "startup complete" (stale log, dead process).
+
+**Root cause (if found):**
+- No new product bug. Last session's `.env` change (`gemini-2.5-pro` → `gemini-2.5-flash`) was the real fix; this session only confirmed it live. The `pro` free-tier quota of `limit: 0` was the entire cause of the 50-question offline-fallback run.
+- Paging-file crash: two independent model loads, not a code defect.
+
+**Fix applied:**
+- None needed. Verification only. Run one model-loading process at a time; use `PYTHONPATH=e:/job_project/restapi` for scripts outside the root and `PYTHONIOENCODING=utf-8` when printing Bengali.
+
+**Still needs attention:**
+- Delete the temp diagnostic `check_gemini.py` (kept for now since it is the fastest 5-second Gemini health check; it is untracked in git).
+- The 32s sleep in `test_50_questions.py` can now drop to ~2-4s — `flash` has a real allowance, unlike `pro`. Cuts the suite from ~27 min to ~3 min. Not yet changed.
+- The 50-question suite has NOT been re-run against Gemini. Its previous results measured only the offline extractor and are stale — rerun before trusting any accuracy number.
+- `[PASS]` in `test_50_questions.py` still only asserts "regex matched something," not correctness. Fix before using it as an accuracy metric.
+- Offline-extractor field-mapping bugs (roll/registration/NID→mobile, DOB→timestamp, gender→name) remain unfixed. Lower priority now that Gemini is the live path, but it is still the fallback whenever the API 429s.
+- Silent fallback is still invisible to API clients — `synthesize_answer()` only calls `logger.warning`. Surfacing the fallback reason in `QueryResponse` would have caught the quota bug in minutes instead of a full test cycle.
+- Server startup takes 3-5 min (embedding model load), consistent with the note above.
